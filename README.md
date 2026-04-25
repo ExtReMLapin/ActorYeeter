@@ -1,2 +1,13 @@
 # ActorYeeter
 in prime video auto skip scenes with """actors""" you hate
+
+
+Inspired by the guy he was skipping any scene with *Erin "botched" Moriarty*
+
+
+<img width="232" height="178" alt="image" src="https://github.com/user-attachments/assets/a4d78104-f690-4c1c-aec9-78a32578dc55" />
+
+
+<img width="565" height="465" alt="image" src="https://github.com/user-attachments/assets/93add537-6c56-42c1-aa07-468cb3cfdb95" />
+
+
