@@ -4,6 +4,8 @@ in prime video auto skip scenes with """actors""" you hate
 
 Inspired by the guy he was skipping any scene with *Erin "botched" Moriarty*
 
+Skip capacity is based on X-Ray data being correctly provided by amazon team
+
 
 <img width="232" height="178" alt="image" src="https://github.com/user-attachments/assets/a4d78104-f690-4c1c-aec9-78a32578dc55" />
 
