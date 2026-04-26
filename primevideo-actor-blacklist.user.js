@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Prime Video — Actor Blacklist (auto-skip via X-Ray)
+// @name         Prime Video — Actor Yeeter (auto-skip via X-Ray)
 // @namespace    https://primevideo.com/userscripts
-// @version      0.2.0
+// @version      0.3.0
 // @description  Automatically skips scenes featuring blacklisted actors, using the X-Ray data prefetched by the player.
 // @author       you
 // @match        *://*.primevideo.com/*
@@ -83,9 +83,17 @@
       return Array.isArray(arr) ? arr.filter(e => e && e.imdbId) : [];
     } catch { return []; }
   }
-  function saveBlacklist(list) {
+  function saveBlacklist(list, opts) {
     localStorage.setItem(LS_KEY, JSON.stringify(list));
-    refreshUI();
+    if (!opts || opts.refresh !== false) refreshUI();
+    else updateStats();
+  }
+  function updateStats() {
+    if (!panelEl) return;
+    const cast = getDisplayCast();
+    const blN = loadBlacklist().length;
+    const el = panelEl.querySelector(`#${NS}-stats`);
+    if (el) el.textContent = `${segments.length} segments · ${cast.length} actors detected · ${blN} blocked`;
   }
   function loadOpts() {
     try { return Object.assign({ enabled: true }, JSON.parse(localStorage.getItem(LS_OPTS_KEY) || '{}')); }
@@ -232,6 +240,11 @@
   }
 
   function ingest(root) {
+    // A full xrayVOD payload is self-contained for the current title:
+    // wipe previous state so we never accumulate cast/segments across titles.
+    idToInfo = new Map();
+    segments = [];
+    lastSkippedSegment = null;
     const nameByNm = idToInfo;
     const segs = [];
 
@@ -469,7 +482,7 @@
 
     fabEl = document.createElement('div');
     fabEl.className = `${NS}-fab`;
-    fabEl.title = 'Prime Video Actor Blacklist';
+    fabEl.title = 'Prime Video Actor Yeeter';
     fabEl.textContent = '⛔';
     fabEl.addEventListener('click', () => {
       panelEl.classList.toggle(`${NS}-open`);
@@ -481,7 +494,7 @@
     panelEl.className = `${NS}-panel`;
     panelEl.innerHTML = `
       <div class="${NS}-head">
-        <h3>Actor Blacklist</h3>
+        <h3>Actor Yeeter</h3>
         <span class="${NS}-toggle">
           <input type="checkbox" id="${NS}-enabled">
           <label for="${NS}-enabled">auto-skip</label>
@@ -519,16 +532,23 @@
   function rowFor(actor, action) {
     const r = document.createElement('div');
     r.className = `${NS}-row`;
-    r.innerHTML = `
-      <img src="${actor.image || ''}" onerror="this.style.visibility='hidden'">
-      <div class="${NS}-meta">
-        <div class="${NS}-name"></div>
-        <div class="${NS}-char"></div>
-      </div>
-    `;
-    r.querySelector(`.${NS}-name`).textContent = actor.name || actor.imdbId;
-    r.querySelector(`.${NS}-char`).textContent = actor.character || '';
-    r.appendChild(action);
+    // Build children imperatively so we can attach loading="lazy" attribute,
+    // which prevents 100+ image fetches firing at once on a big cast.
+    const img = document.createElement('img');
+    if (actor.image) img.src = actor.image;
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.onerror = () => { img.style.visibility = 'hidden'; };
+    const meta = document.createElement('div');
+    meta.className = `${NS}-meta`;
+    const name = document.createElement('div');
+    name.className = `${NS}-name`;
+    name.textContent = actor.name || actor.imdbId;
+    const ch = document.createElement('div');
+    ch.className = `${NS}-char`;
+    ch.textContent = actor.character || '';
+    meta.appendChild(name); meta.appendChild(ch);
+    r.appendChild(img); r.appendChild(meta); r.appendChild(action);
     return r;
   }
 
@@ -603,23 +623,32 @@
         body.appendChild(e);
         return;
       }
+      // Build all rows in a fragment first (single DOM write).
+      const frag = document.createDocumentFragment();
       for (const a of all) {
         const blocked = blSet.has(a.imdbId);
         const btn = document.createElement('button');
-        btn.className = `${NS}-btn ${blocked ? `${NS}-active` : ''}`;
-        btn.textContent = blocked ? '✓ blocked' : '🚫 block';
+        const setBtn = (isBlocked) => {
+          btn.className = `${NS}-btn ${isBlocked ? `${NS}-active` : ''}`;
+          btn.textContent = isBlocked ? '✓ blocked' : '🚫 block';
+        };
+        setBtn(blocked);
         btn.addEventListener('click', () => {
+          // In-place toggle: do NOT call refreshUI (which would rebuild
+          // the whole list and re-fetch every actor image — the freeze).
           const list = loadBlacklist();
-          if (blSet.has(a.imdbId)) {
-            saveBlacklist(list.filter(x => x.imdbId !== a.imdbId));
-          } else {
-            list.push({ imdbId: a.imdbId, name: a.name });
-            saveBlacklist(list);
-          }
+          const isBlocked = list.some(x => x.imdbId === a.imdbId);
+          const next = isBlocked
+            ? list.filter(x => x.imdbId !== a.imdbId)
+            : list.concat([{ imdbId: a.imdbId, name: a.name }]);
+          saveBlacklist(next, { refresh: false });
+          if (isBlocked) blSet.delete(a.imdbId); else blSet.add(a.imdbId);
+          setBtn(!isBlocked);
           lastSkippedSegment = null;
         });
-        body.appendChild(rowFor(a, btn));
+        frag.appendChild(rowFor(a, btn));
       }
+      body.appendChild(frag);
     }
   }
   refreshUI._suggest = function (q, container) {
@@ -670,31 +699,88 @@
     mo.observe(document.documentElement, { childList: true, subtree: true });
     bindToVideo();
 
-    if (IS_TOP) {
-      buildUI();
-      // Listen for cross-frame events with the cast detected by iframes.
-      if (bc) {
-        bc.onmessage = (ev) => {
-          if (!ev || !ev.data) return;
-          if (ev.data.type === 'cast' && Array.isArray(ev.data.cast)) {
-            // Hydrate idToInfo (used by the UI) from the broadcast.
-            for (const c of ev.data.cast) {
-              const cur = idToInfo.get(c.imdbId) || { name: null, character: null, image: null };
-              if (c.name && (!cur.name || cur.name.length < c.name.length)) cur.name = c.name;
-              if (c.character && !cur.character) cur.character = c.character;
-              if (c.image && !cur.image) cur.image = c.image;
-              idToInfo.set(c.imdbId, cur);
-            }
+    // BroadcastChannel: 'reset' is handled in every frame; 'cast' only in top.
+    if (bc) {
+      bc.onmessage = (ev) => {
+        if (!ev || !ev.data) return;
+        if (ev.data.type === 'reset') {
+          idToInfo = new Map();
+          segments = [];
+          lastSkippedSegment = null;
+          if (IS_TOP) {
+            try { localStorage.removeItem(LS_CAST_KEY); } catch (_) {}
             refreshUI();
           }
-        };
-      }
+          return;
+        }
+        if (IS_TOP && ev.data.type === 'cast' && Array.isArray(ev.data.cast)) {
+          // REPLACE (not append): each broadcast carries the full cast
+          // for the current title.
+          const next = new Map();
+          for (const c of ev.data.cast) {
+            next.set(c.imdbId, {
+              name: c.name || null,
+              character: c.character || null,
+              image: c.image || null,
+            });
+          }
+          idToInfo = next;
+          refreshUI();
+        }
+      };
+    }
+
+    if (IS_TOP) {
+      buildUI();
       // Also react to localStorage changes from other tabs.
       window.addEventListener('storage', (ev) => {
         if (ev.key === LS_KEY || ev.key === LS_CAST_KEY) refreshUI();
       });
+      // SPA navigation: Prime Video swaps titles via history.pushState without
+      // a full reload. Detect URL change and reset the in-memory + cached cast
+      // so the panel never shows the previous title's actors.
+      installNavWatcher();
     }
     LOG('Init OK (' + FRAME_TAG + ').');
+  }
+
+  function titleKeyFromUrl(href) {
+    // Try to extract a stable title id from primevideo URLs:
+    //   /detail/<ASIN>           ← series/movie page
+    //   /play/<ASIN>             ← player URL
+    //   ?gti=<ASIN> / ?asin=...  ← occasional query forms
+    const m = href.match(/\/(?:detail|play)\/([A-Z0-9]{10,})/i)
+            || href.match(/[?&](?:gti|asin)=([A-Z0-9]{10,})/i);
+    return m ? m[1] : href.split('?')[0];  // fallback : path without query
+  }
+
+  function installNavWatcher() {
+    let lastKey = titleKeyFromUrl(location.href);
+    const onMaybeChange = () => {
+      const k = titleKeyFromUrl(location.href);
+      if (k === lastKey) return;
+      lastKey = k;
+      LOG('Title changed →', k, '· clearing cast/segments');
+      idToInfo = new Map();
+      segments = [];
+      lastSkippedSegment = null;
+      try { localStorage.removeItem(LS_CAST_KEY); } catch (_) {}
+      if (bc) try { bc.postMessage({ type: 'reset' }); } catch (_) {}
+      refreshUI();
+    };
+    // Patch pushState/replaceState (single-page navigation) + listen popstate.
+    const wrap = (fn) => function () {
+      const r = fn.apply(this, arguments);
+      try { onMaybeChange(); } catch (_) {}
+      return r;
+    };
+    try {
+      history.pushState = wrap(history.pushState);
+      history.replaceState = wrap(history.replaceState);
+    } catch (_) {}
+    window.addEventListener('popstate', onMaybeChange, { passive: true });
+    // Cheap polling as a safety net (some routers don't go through pushState).
+    setInterval(onMaybeChange, 1500);
   }
   boot();
 })();
