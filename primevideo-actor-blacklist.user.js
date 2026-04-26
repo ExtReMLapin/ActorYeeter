@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prime Video — Actor Yeeter (auto-skip via X-Ray)
 // @namespace    https://primevideo.com/userscripts
-// @version      0.3.0
+// @version      0.4.0
 // @description  Automatically skips scenes featuring blacklisted actors, using the X-Ray data prefetched by the player.
 // @author       you
 // @match        *://*.primevideo.com/*
@@ -50,6 +50,7 @@
   const NS = 'pvAB';                     // namespace for CSS classes & DOM ids
   const LS_KEY = 'pvAB.blacklist.v1';    // localStorage key: [{imdbId, name}]
   const LS_CAST_KEY = 'pvAB.cast.v1';    // last detected cast (UI cache)
+  const LS_SEG_KEY = 'pvAB.segments.v1'; // last detected segments (for overlay)
   const LS_OPTS_KEY = 'pvAB.options.v1'; // { enabled: bool }
   const IS_TOP = (function () { try { return window.top === window; } catch (_) { return false; } })();
   const FRAME_TAG = IS_TOP ? 'top' : 'frame';
@@ -345,6 +346,14 @@
     try { localStorage.setItem(LS_CAST_KEY, JSON.stringify({ ts: Date.now(), cast: arr })); } catch (_) {}
     // BroadcastChannel for the top frame.
     if (bc) try { bc.postMessage({ type: 'cast', cast: arr }); } catch (_) {}
+    publishSegments();
+  }
+
+  function publishSegments() {
+    // Sets are not JSON-serializable: turn them into arrays.
+    const flat = segments.map(s => ({ start: s.start, end: s.end, ids: [...s.ids] }));
+    try { localStorage.setItem(LS_SEG_KEY, JSON.stringify({ ts: Date.now(), inMs: timesAreMs, segments: flat })); } catch (_) {}
+    if (bc) try { bc.postMessage({ type: 'segments', inMs: timesAreMs, segments: flat }); } catch (_) {}
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -689,6 +698,170 @@
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  //  Seekbar overlay (top frame only): paint blacklisted segments in red
+  //  on Prime Video's <input type=range> scrub bar.
+  // ──────────────────────────────────────────────────────────────────────────
+  const SEEKBAR_CONTAINER_SEL = '.atvwebplayersdk-seekbar-container';
+  const SEEKBAR_INPUT_SEL = '.atvwebplayersdk-seekbar-range';
+  const OVERLAY_CLASS = NS + '-seek-overlay';
+
+  function getDurationMs() {
+    // Prime Video's main playback <video> lives in the parent (or sometimes in
+    // the iframe). We pick the one with the largest finite duration > 60s, so
+    // we don't latch onto the trailer / interstitial.
+    const all = [];
+    try { for (const v of document.querySelectorAll('video')) all.push(v); } catch (_) {}
+    try {
+      const f = document.getElementById('starlight-iframe');
+      if (f && f.contentDocument) for (const v of f.contentDocument.querySelectorAll('video')) all.push(v);
+    } catch (_) { /* cross-origin or detached */ }
+    let best = null;
+    for (const v of all) {
+      if (!v || !isFinite(v.duration) || v.duration < 60) continue;
+      if (!best || v.duration > best.duration) best = v;
+    }
+    return best ? best.duration * 1000 : 0;
+  }
+
+  function loadSegmentsFromCache() {
+    if (segments.length) return;  // already populated via broadcast / ingest
+    try {
+      const raw = localStorage.getItem(LS_SEG_KEY);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      if (!Array.isArray(obj.segments)) return;
+      segments = obj.segments.map(s => ({ start: s.start, end: s.end, ids: new Set(s.ids) }));
+      timesAreMs = !!obj.inMs;
+    } catch (_) { /* ignore */ }
+  }
+
+  function clearSeekOverlay() {
+    try {
+      for (const o of document.querySelectorAll('.' + OVERLAY_CLASS)) o.remove();
+    } catch (_) {}
+  }
+
+  let seekRenderTimer = 0;
+  function scheduleSeekRender() {
+    if (seekRenderTimer) return;
+    seekRenderTimer = setTimeout(() => { seekRenderTimer = 0; renderSeekOverlay(); }, 80);
+  }
+
+  function renderSeekOverlay() {
+    if (!IS_TOP) return;
+    const sbc = document.querySelector(SEEKBAR_CONTAINER_SEL);
+    if (!sbc) return;
+    loadSegmentsFromCache();
+    if (!segments.length) { clearSeekOverlay(); return; }
+
+    const blIds = blacklistedSet();
+    if (!blIds.size) { clearSeekOverlay(); return; }
+
+    const durMs = getDurationMs();
+    if (!durMs) return;
+
+    // Convert any X-Ray time unit to ms for the percentage calculation.
+    const toMs = t => (timesAreMs ? t : t * 1000);
+
+    // Build/update the overlay layer as a child of the seekbar container.
+    let layer = sbc.querySelector('.' + OVERLAY_CLASS);
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.className = OVERLAY_CLASS;
+      Object.assign(layer.style, {
+        position: 'absolute',
+        // Match the visual track: 6px high, vertically centered in the
+        // seekbar's hit area.
+        left: '0', right: '0', top: '50%',
+        transform: 'translateY(-50%)',
+        height: '6px',
+        pointerEvents: 'none',
+        zIndex: '4',
+      });
+      // Container needs to be positioned for absolute children to anchor on it.
+      const cs = getComputedStyle(sbc);
+      if (cs.position === 'static') sbc.style.position = 'relative';
+      sbc.appendChild(layer);
+    }
+
+    // Reuse a single fragment to minimize layout thrash.
+    const frag = document.createDocumentFragment();
+    let paintedCount = 0;
+    for (const seg of segments) {
+      let hit = false;
+      for (const id of seg.ids) if (blIds.has(id)) { hit = true; break; }
+      if (!hit) continue;
+      const sMs = toMs(seg.start), eMs = toMs(seg.end);
+      const startPct = Math.max(0, (sMs / durMs) * 100);
+      const widthPct = Math.max(0.2, ((eMs - sMs) / durMs) * 100);  // 0.2% min so we always see a sliver
+      if (startPct >= 100) continue;
+      const m = document.createElement('div');
+      Object.assign(m.style, {
+        position: 'absolute',
+        left: startPct + '%',
+        width: widthPct + '%',
+        top: '0',
+        height: '100%',
+        background: 'rgba(232, 60, 60, 0.85)',
+        boxShadow: '0 0 4px rgba(232,60,60,0.6)',
+        borderRadius: '2px',
+      });
+      frag.appendChild(m);
+      paintedCount++;
+    }
+    layer.replaceChildren(frag);
+    LOG('Seek overlay rendered:', paintedCount, '/', segments.length, 'segments highlighted');
+  }
+
+  function installSeekObservers() {
+    if (!IS_TOP) return;
+
+    // Re-render when:
+    //   - the seekbar container is added/removed/replaced (it's recreated when
+    //     the user enters/leaves the player or skips between episodes),
+    //   - the blacklist changes in another tab,
+    //   - the video duration becomes known.
+    const mo = new MutationObserver(() => scheduleSeekRender());
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    window.addEventListener('storage', (ev) => {
+      if (ev.key === LS_KEY || ev.key === LS_SEG_KEY) scheduleSeekRender();
+    });
+
+    // Hook video durationchange (any <video> we discover) so the percentage
+    // recomputation happens once duration is known.
+    const seenVideos = new WeakSet();
+    const wireVideo = (v) => {
+      if (!v || seenVideos.has(v)) return;
+      seenVideos.add(v);
+      v.addEventListener('durationchange', scheduleSeekRender, { passive: true });
+      v.addEventListener('loadedmetadata', scheduleSeekRender, { passive: true });
+    };
+    const scanVideos = () => {
+      try { for (const v of document.querySelectorAll('video')) wireVideo(v); } catch (_) {}
+      try {
+        const f = document.getElementById('starlight-iframe');
+        if (f && f.contentDocument) for (const v of f.contentDocument.querySelectorAll('video')) wireVideo(v);
+      } catch (_) {}
+    };
+    scanVideos();
+    setInterval(scanVideos, 2000);
+
+    // First render attempt + periodic safety net (handles cases where the
+    // player rebuilds the seekbar without us catching the mutation).
+    scheduleSeekRender();
+    setInterval(scheduleSeekRender, 4000);
+  }
+
+  // Make saveBlacklist also refresh the overlay (cheap thanks to the
+  // scheduler). Decorate after the function exists.
+  const __origSaveBlacklist = saveBlacklist;
+  saveBlacklist = function (list, opts) {
+    __origSaveBlacklist(list, opts);
+    if (IS_TOP) scheduleSeekRender();
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
   //  Boot: UI in top frame only, hooks + skip engine in every frame
   // ──────────────────────────────────────────────────────────────────────────
   function boot() {
@@ -699,7 +872,7 @@
     mo.observe(document.documentElement, { childList: true, subtree: true });
     bindToVideo();
 
-    // BroadcastChannel: 'reset' is handled in every frame; 'cast' only in top.
+    // BroadcastChannel: 'reset' is handled in every frame; 'cast'/'segments' only in top.
     if (bc) {
       bc.onmessage = (ev) => {
         if (!ev || !ev.data) return;
@@ -709,6 +882,8 @@
           lastSkippedSegment = null;
           if (IS_TOP) {
             try { localStorage.removeItem(LS_CAST_KEY); } catch (_) {}
+            try { localStorage.removeItem(LS_SEG_KEY); } catch (_) {}
+            clearSeekOverlay();
             refreshUI();
           }
           return;
@@ -727,6 +902,11 @@
           idToInfo = next;
           refreshUI();
         }
+        if (IS_TOP && ev.data.type === 'segments' && Array.isArray(ev.data.segments)) {
+          segments = ev.data.segments.map(s => ({ start: s.start, end: s.end, ids: new Set(s.ids) }));
+          timesAreMs = !!ev.data.inMs;
+          renderSeekOverlay();
+        }
       };
     }
 
@@ -740,6 +920,8 @@
       // a full reload. Detect URL change and reset the in-memory + cached cast
       // so the panel never shows the previous title's actors.
       installNavWatcher();
+      // Paint blacklisted scenes in red over the player's seek bar.
+      installSeekObservers();
     }
     LOG('Init OK (' + FRAME_TAG + ').');
   }
@@ -765,7 +947,9 @@
       segments = [];
       lastSkippedSegment = null;
       try { localStorage.removeItem(LS_CAST_KEY); } catch (_) {}
+      try { localStorage.removeItem(LS_SEG_KEY); } catch (_) {}
       if (bc) try { bc.postMessage({ type: 'reset' }); } catch (_) {}
+      clearSeekOverlay();
       refreshUI();
     };
     // Patch pushState/replaceState (single-page navigation) + listen popstate.
