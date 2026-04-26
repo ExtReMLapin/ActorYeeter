@@ -15,3 +15,4 @@ Skip capacity is based on X-Ray data being correctly provided by amazon team
 <img width="565" height="465" alt="image" src="https://github.com/user-attachments/assets/93add537-6c56-42c1-aa07-468cb3cfdb95" />
 
 
+<img width="3647" height="369" alt="image" src="https://github.com/user-attachments/assets/fe919adf-a107-45fc-b644-ab39681914c6" />
