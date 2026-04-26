@@ -1,3 +1,5 @@
+You'll need Tampermonkey/greasemonkey to run this script
+
 # ActorYeeter
 in prime video auto skip scenes with """actors""" you hate
 
