@@ -1,5 +1,10 @@
 You'll need Tampermonkey/greasemonkey to run this script
 
+Firefox : [Tampermonkey](https://addons.mozilla.org/fr/firefox/addon/tampermonkey/)
+Chrome : [Tampermonkey](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+
+
+
 # ActorYeeter
 in prime video auto skip scenes with """actors""" you hate
 
