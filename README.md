@@ -1,8 +1,13 @@
 You'll need Tampermonkey/greasemonkey to run this script
 
+### 1. Install tamper monkey
+
 Firefox : [Tampermonkey](https://addons.mozilla.org/fr/firefox/addon/tampermonkey/)
+
 Chrome : [Tampermonkey](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
 
+### 2. Install the script 
+[Click there](https://github.com/ExtReMLapin/ActorYeeter/raw/refs/heads/main/primevideo-actor-blacklist.user.js)
 
 
 # ActorYeeter
